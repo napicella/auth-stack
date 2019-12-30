@@ -1,0 +1,10 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "JwtAuth"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-gw77p4l6bth0"
+s3_prefix = "JwtAuth"
+region = "us-west-2"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"

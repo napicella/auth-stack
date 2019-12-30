@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  jwt-auth
+  
+  Sample SAM Template for jwt-auth
+
+Globals:
+  Function:
+    Timeout: 5
+
+Resources:
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: bin/
+      Handler: web
+      Runtime: go1.x
+      Environment:
+        Variables:
+          USER_TABLE: !Ref UserTable
+      ## Normally we would use SAM and Policies, but SAM does not support all the
+      ## managed policies and it does not support custom ones.
+      ## In this case we use Secret manager is not supported
+      ## by SAM. That's why we create a role and assign the role to the Lambda.
+      ## Note that a role assigned to a Lambda needs to always contain the
+      ## service-role/AWSLambdaBasicExecutionRole.
+      ## Note also the trust policy which allows the Role to be assumed by Lambda.
+      Role: !GetAtt HelloWorldFunctionRole.Arn
+
+  HelloWorldFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: SecretManagerReadOnly
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:DescribeSecret'
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:jwt-signing-key-rE8qLr'
+        - PolicyName: DynamoDBCrud
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:GetItem"
+                  - "dynamodb:PutItem"
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:DeleteItem"
+                Resource: !GetAtt UserTable.Arn
+
+  MyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+
+      ## This responsible for the global throttling
+      ## for APi gateway accross all methods, resources and callers.
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 10
+          ThrottlingRateLimit: 10
+
+      StageName: Prod
+      DefinitionBody:
+        swagger: 2.0
+        info:
+          ## Note, this value is going to be used by SAM as Api Name
+          title: "JwtAuth"
+        paths:
+          "/api/{proxy+}":
+            x-amazon-apigateway-any-method:
+              security:
+                - request_authorizer_single_header: []
+              produces:
+                - application/json
+              x-amazon-apigateway-integration:
+                uri:
+                  !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HelloWorldFunction.Arn}/invocations"
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+
+
+          "/s/{proxy+}":
+            x-amazon-apigateway-any-method:
+              produces:
+                - application/json
+              x-amazon-apigateway-integration:
+                uri:
+                  !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HelloWorldFunction.Arn}/invocations"
+                passthroughBehavior: when_no_match
+                httpMethod: POST
+                type: aws_proxy
+
+        securityDefinitions:
+          request_authorizer_single_header:
+            type: apiKey
+            name: auth
+            in: header
+            x-amazon-apigateway-authtype: custom
+            x-amazon-apigateway-authorizer:
+              type: request
+              identitySource: method.request.header.Cookie
+              authorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CustomAuthorizerFunction.Arn}/invocations"
+
+  UserTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S      # S stands for string
+        - AttributeName: password
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+        - AttributeName: password
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  CustomAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: bin/
+      Handler: authorizer
+      Runtime: go1.x
+      Role: !GetAtt HelloWorldFunctionRole.Arn
+
+
+  # Current workaround needed for error:
+  # Execution failed due to configuration error: Invalid permissions on Lambda function.
+  # See https://github.com/awslabs/serverless-application-model/issues/59
+  # It's possibly a bug in SAM that does not appear to have been fixed
+  ConfigLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    DependsOn:
+      - CustomAuthorizerFunction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CustomAuthorizerFunction
+      Principal: apigateway.amazonaws.com
+
+  # Current workaround needed for error:
+  # Execution failed due to configuration error: Invalid permissions on Lambda function.
+  # See https://github.com/awslabs/serverless-application-model/issues/59
+  # It's possibly a bug in SAM that does not appear to have been fixed
+  Config2LambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    DependsOn:
+      - HelloWorldFunction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref HelloWorldFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  HelloWorldAPI:
+    Description: "API Gateway endpoint URL for Prod environment for First Function"
+    Value: !Sub "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  HelloWorldFunction:
+    Description: "First Lambda Function ARN"
+    Value: !GetAtt HelloWorldFunction.Arn
+  HelloWorldFunctionIamRole:
+    Description: "Implicit IAM Role created for Hello World function"
+    Value: !GetAtt HelloWorldFunctionRole.Arn
